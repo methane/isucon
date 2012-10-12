@@ -94,25 +94,40 @@ def comment(articleid):
     db.con.commit()
     return flask.redirect('/')
 
-@app.route('/<path:path>')
-def css(path):
-    if '..' in path or path.startswith('/'):
-        flask.abort(404)
-    with open('../staticfiles/' + path) as f:
-        d = f.read()
-    if path.endswith('.css'):
-        content_type = 'text/css'
-    elif path.endswith('.js'):
-        content_type = 'application/javascript'
-    elif path.endswith(('.jpg', '.jpeg')):
-        content_type = 'image/jpeg'
-    else:
-        content_type = 'text/plain'
 
-    def res(e, s):
-        s("200 OK", [('Content-Length', str(len(d))), ('Content-Type', content_type)])
-        return [d]
-    return res
+_static_cache = {}
+
+def prepare_static(scan_dir, prefix='/static/'):
+    for dir, _, files in os.walk(scan_dir):
+        for f in files:
+            content_type = 'text/plain'
+            if f.endswith('.css'):
+                content_type = 'text/css'
+            elif f.endswith('.js'):
+                content_type = 'application/javascript'
+            elif f.endswith(('.jpg', '.jpeg')):
+                content_type = 'image/jpeg'
+            p = os.path.join(dir, f)
+            data = open(p).read()
+            _static_cache[prefix + os.path.relpath(p, scan_dir)] = (
+                    [('Content-Length', str(len(data))),
+                     ('Content-Type', content_type),
+                     ], data)
+    #print _static_cache.keys()
+
+def cache_middleware(app):
+    def get_cache(env, start):
+        path = env['PATH_INFO']
+        if path in _static_cache:
+            head, body = _static_cache[path]
+            start("200 OK", head)
+            return [body]
+        return app(env, start)
+    return get_cache
+
+
+prepare_static('../staticfiles', '/')
+app.wsgi_app = cache_middleware(app.wsgi_app)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
