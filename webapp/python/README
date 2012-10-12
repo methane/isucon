@@ -1,0 +1,20 @@
+isucon-python
+=============
+
+install
+--------
+
+::
+
+    wget https://raw.github.com/pypa/virtualenv/master/virtualenv.py
+    python virtualenv.py --distribute .py
+    source .py/bin/activate
+    pip install -r requirements
+
+
+run
+----
+
+::
+
+    python isucon.py

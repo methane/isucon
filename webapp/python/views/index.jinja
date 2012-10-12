@@ -1,0 +1,21 @@
+{% extends "base.jinja" %}
+{% block content %}
+{% for article in articles %}
+    <div class="article">
+    <div class="title">{{ article.title }}</div>
+    <div class="created">{{ article.created_at }}</div>
+    <div class="body">
+{% for line in article.body.splitlines() %}
+{% if loop.index0 < 8 %}
+{{line}}<br>
+{% endif %}
+{% endfor %}
+    </div>
+    <div class="articlelink">
+{% if article.body.splitlines()|count > 8 %}
+... ...
+{% endif %}
+<a href="/article/{{ article.id }}">read more</a></div>
+    </div>
+{% endfor %}
+{% endblock %}
