@@ -5,6 +5,13 @@ import pymysql
 from pymysql.cursors import DictCursor
 from threading import local
 
+import flask
+import re
+import time
+import jinja2
+from jinja2 import evalcontextfilter, Markup, escape, Environment
+
+
 config = json.load(open('../config/hosts.json'))
 
 ctx = local()
@@ -31,12 +38,7 @@ db = ConnectionPool()
 
 print config
 
-import flask
 app = flask.Flask(__name__)
-
-import re
-import jinja2
-from jinja2 import evalcontextfilter, Markup, escape, Environment
 
 jinja_env = Environment(loader=jinja2.FileSystemLoader('views'))
 
@@ -45,11 +47,24 @@ def render(template, **params):
 
 
 def fetch_recent_commented_articles():
+    global _recent_articles
     cur = db.con.cursor(DictCursor)
     cur.execute(
             'SELECT a.id, a.title FROM comment c INNER JOIN article a ON c.article = a.id '
             'GROUP BY a.id ORDER BY MAX(c.created_at) DESC LIMIT 10')
-    return cur.fetchall()
+    _recent_articles = cur.fetchall()
+
+_recent_articles_cache = None
+_recent_articles_cache_fetched = None
+
+def get_recent_commented_articles():
+    global _recent_articles_cache
+    global _recent_articles_cache_fetched
+    if _recent_articles_cache is None or _recent_articles_cache_fetched + 3 < time.time():
+        _recent_articles_cache = fetch_articles()
+        _recent_articles_cache_fetched = time.time()
+    return _recent_articles_cache
+
 
 def fetch_articles():
     cur = db.con.cursor(DictCursor)
@@ -65,20 +80,20 @@ def fetch_article(id):
 def index():
     return render("index.jinja",
         articles=fetch_articles(),
-        recent_commented_articles=fetch_recent_commented_articles(),
+        recent_commented_articles=get_recent_commented_articles(),
         )
 
 @app.route('/article/<int:articleid>')
 def article(articleid):
     return render('article.jinja',
         article=fetch_article(articleid),
-        recent_commented_articles=fetch_recent_commented_articles(),
+        recent_commented_articles=get_recent_commented_articles(),
         )
 
 @app.route('/post', methods=('GET', 'POST'))
 def post():
     if flask.request.method == 'GET':
-        return render("post.jinja", recent_commented_articles=fetch_recent_commented_articles())
+        return render("post.jinja", recent_commented_articles=get_recent_commented_articles())
     cur = db.con.cursor()
     cur.execute("INSERT INTO article SET title=%s, body=%s", (flask.request.form['title'], flask.request.form['body']))
     db.con.commit()
@@ -95,7 +110,7 @@ def comment(articleid):
     return flask.redirect('/')
 
 
-_static_cache = {}
+_cache = {}
 
 def prepare_static(scan_dir, prefix='/static/'):
     for dir, _, files in os.walk(scan_dir):
@@ -109,17 +124,17 @@ def prepare_static(scan_dir, prefix='/static/'):
                 content_type = 'image/jpeg'
             p = os.path.join(dir, f)
             data = open(p).read()
-            _static_cache[prefix + os.path.relpath(p, scan_dir)] = (
+            _cache[prefix + os.path.relpath(p, scan_dir)] = (
                     [('Content-Length', str(len(data))),
                      ('Content-Type', content_type),
                      ], data)
-    #print _static_cache.keys()
+    #print _cache.keys()
 
 def cache_middleware(app):
     def get_cache(env, start):
         path = env['PATH_INFO']
-        if path in _static_cache:
-            head, body = _static_cache[path]
+        if env['REQUEST_METHOD'] == 'GET' and path in _cache:
+            head, body = _cache[path]
             start("200 OK", head)
             return [body]
         return app(env, start)
