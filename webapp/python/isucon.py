@@ -1,3 +1,6 @@
+import meinheld.patch
+meinheld.patch.patch_socket()
+
 import os
 import json
 
@@ -145,4 +148,9 @@ prepare_static('../staticfiles', '/')
 app.wsgi_app = cache_middleware(app.wsgi_app)
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    #app.run(host='0.0.0.0', port=5000)
+    import meinheld
+    meinheld.set_access_logger(None)
+    meinheld.set_backlog(128)
+    meinheld.listen(('0.0.0.0', 5000))
+    meinheld.run(app)
