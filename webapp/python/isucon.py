@@ -1,5 +1,5 @@
-import meinheld.patch
-meinheld.patch.patch_socket()
+import greenlet
+mein_greenlet = greenlet.getcurrent()
 
 import os
 import json
@@ -16,19 +16,13 @@ from jinja2 import evalcontextfilter, Markup, escape, Environment
 
 
 config = json.load(open('../config/hosts.json'))
+print config
 
-ctx = local()
 
-class ConnectionPool(local):
+class DB(object):
     @property
     def con(self):
-        if not hasattr(self, '_con'):
-            self._con = self._get_con()
-        return self._con
-
-    def _get_con(self):
-        #host = str(config['servers']['database'][0])
-        host = 'localhost'
+        host = str(config['servers']['database'][0])
         return pymysql.connect(
                     host=host,
                     user='isuconapp',
@@ -37,9 +31,8 @@ class ConnectionPool(local):
                     charset='utf8',
                     )
 
-db = ConnectionPool()
+db = DB()
 
-print config
 
 app = flask.Flask(__name__)
 
@@ -61,10 +54,9 @@ _recent_articles_cache = None
 _recent_articles_cache_fetched = None
 
 def get_recent_commented_articles():
-    global _recent_articles_cache
-    global _recent_articles_cache_fetched
+    global _recent_articles_cache, _recent_articles_cache_fetched
     if _recent_articles_cache is None or _recent_articles_cache_fetched + 3 < time.time():
-        _recent_articles_cache = fetch_articles()
+        _recent_articles_cache = fetch_recent_commented_articles()
         _recent_articles_cache_fetched = time.time()
     return _recent_articles_cache
 
@@ -97,9 +89,11 @@ def article(articleid):
 def post():
     if flask.request.method == 'GET':
         return render("post.jinja", recent_commented_articles=get_recent_commented_articles())
-    cur = db.con.cursor()
+    con = db.con
+    cur = con.cursor()
     cur.execute("INSERT INTO article SET title=%s, body=%s", (flask.request.form['title'], flask.request.form['body']))
-    db.con.commit()
+    print cur.lastrowid
+    con.commit()
     return flask.redirect('/')
 
 @app.route('/comment/<int:articleid>', methods=['POST'])
@@ -144,6 +138,46 @@ def cache_middleware(app):
     return get_cache
 
 
+def update_all_cache():
+    text_html = ('Content-Type', 'text/html')
+
+    data = index().encode('utf-8')
+    _cache['/'] = ([text_html, ('Content-Length', str(len(data)))], data)
+
+    data = render("post.jinja",
+            recent_commented_articles=get_recent_commented_articles()).encode('utf-8')
+    _cache['/post'] = ([text_html, ('Content-Length', str(len(data)))], data)
+
+    articleid = 0
+    while True:
+        print articleid
+        cur = db.con.cursor(DictCursor)
+        cur.execute('SELECT id,title,body,created_at FROM article WHERE id>%s LIMIT 100', (articleid,))
+        for row in cur:
+            articleid = row['id']
+            data = render('article.jinja',
+                    article=row,
+                    recent_commented_articles=get_recent_commented_articles(),
+                    ).encode('utf-8')
+            _cache['/article/'+str(articleid)] = (
+                    [text_html, ('Content-Length', str(len(data)))],
+                    data)
+        if cur.rowcount == 0:
+            break
+
+def sleep(secs):
+    t = time.time() + secs
+    while 1:
+        meinheld.schedule_call(1, greenlet.getcurrent().switch)
+        mein_greenlet.switch()
+        if time.time() > t:
+            break
+
+def background_update():
+    update_all_cache()
+    print "bg"
+    #meinheld.schedule_call(5, background_update)
+
 prepare_static('../staticfiles', '/')
 app.wsgi_app = cache_middleware(app.wsgi_app)
 
@@ -152,5 +186,8 @@ if __name__ == '__main__':
     import meinheld
     meinheld.set_access_logger(None)
     meinheld.set_backlog(128)
+    meinheld.set_keepalive(0)
     meinheld.listen(('0.0.0.0', 5000))
+
+    background_update()
     meinheld.run(app)
