@@ -1,10 +1,14 @@
+# coding: utf-8
 import greenlet
 mein_greenlet = greenlet.getcurrent()
 
 import os
+from itertools import imap
 import json
 import gzip
+import datetime
 from cStringIO import StringIO
+from collections import namedtuple, defaultdict
 
 import pymysql
 from pymysql.cursors import DictCursor
@@ -17,6 +21,8 @@ import jinja2
 from jinja2 import evalcontextfilter, Markup, escape, Environment
 
 
+SEP = b"<!--recent_commented_articles-->"
+
 config = json.load(open('../config/hosts.json'))
 print config
 
@@ -27,6 +33,8 @@ def compress(b):
     f.write(b)
     f.flush()
     return s.getvalue()
+
+def CL(d): return ('Content-Length', str(len(d)))
 
 class DB(object):
     @property
@@ -42,81 +50,152 @@ class DB(object):
 
 db = DB()
 
+# UltraMySQL シンプルな insert や update クエリを投げるには十分だけど、
+# lastrowid とか取れないのであんまり使えない。
+# const char *_host, int _port, const char *_username, const char *_password, const char *_database, int _autoCommit, const char *_charset*/
+#import umysql
+#def get_ucon():
+#    host = str(config['servers']['database'][0])
+#    con = umysql.Connection()
+#    con.connect(host, 3306, 'isuconapp', 'isunageruna', 'isucon', 1, 'utf8')
+#    return con
+
 app = flask.Flask(__name__)
 
 jinja_env = Environment(loader=jinja2.FileSystemLoader('views'))
 
 def render(template, **params):
+    params['host'] = '' ## TODO
     return jinja_env.get_template(template).render(**params)
 
+_recent_commented_articles = []
 
 def fetch_recent_commented_articles():
-    global _recent_articles
-    cur = db.con.cursor(DictCursor)
+    global _recent_commented_articles
+    cur = db.con.cursor()
     cur.execute(
-            'SELECT a.id, a.title FROM comment c INNER JOIN article a ON c.article = a.id '
+            'SELECT a.id FROM comment c INNER JOIN article a ON c.article = a.id '
             'GROUP BY a.id ORDER BY MAX(c.created_at) DESC LIMIT 10')
-    _recent_articles = cur.fetchall()
+    for row in cur:
+        _recent_commented_articles.append(row[0])
 
-_recent_articles_cache = None
-_recent_articles_cache_fetched = None
 
-def get_recent_commented_articles():
-    global _recent_articles_cache
-    global _recent_articles_cache_fetched
-    if _recent_articles_cache is None or _recent_articles_cache_fetched + 3 < time.time():
-        _recent_articles_cache = fetch_articles()
-        _recent_articles_cache_fetched = time.time()
-    return _recent_articles_cache
-
+Article = namedtuple('Article', "id title body created_at")
+_all_articles = {}
+_recent_articles = []
 
 def fetch_articles():
-    cur = db.con.cursor(DictCursor)
-    cur.execute('SELECT id,title,body,created_at FROM article ORDER BY id DESC LIMIT 10')
-    return cur.fetchall()
+    cur = db.con.cursor()
+    cur.execute('SELECT id,title,body,created_at FROM article')
+    for article in imap(Article._make, cur):
+        _all_articles[article.id] = article
+    keys = _all_articles.keys()
+    keys.sort(reverse=True)
+    _recent_articles[:] = keys[:10]
 
-def fetch_article(id):
-    cur = db.con.cursor(DictCursor)
-    cur.execute('SELECT id,title,body,created_at FROM article WHERE id=%s', (id,))
-    return cur.fetchone()
+def get_recent_articles():
+    return [_all_articles[k] for k in _recent_articles]
+
+Comment = namedtuple('Comment', "id article name body created_at")
+_all_comments = defaultdict(list)
+
+def fetch_comments():
+    con = db.con
+    cur = con.cursor()
+    cur.execute("SELECT id, article, name, body, created_at FROM comment ORDER BY id")
+    for comment in imap(Comment._make, cur):
+        _all_comments[comment.article].append(comment)
+
+#def ufetch_comments():
+#    con = get_ucon()
+#    res = con.query("SELECT id, article, name, body, created_at FROM comment ORDER BY id")
+#    for comment in map(Comment._make, res.rows):
+#        _all_comments[comment.article].append(comment)
+
+def get_recent_commented_articles():
+    return [_all_articles[id] for id in _recent_commented_articles]
+
+
+_recent_commented_articles_cache = b''
+def render_recent_commented_articles():
+    global _recent_commented_articles_cache
+    _recent_commented_articles_cache = render(
+            'recent_article.jinja',
+            recent_commented_articles = get_recent_commented_articles(),
+            )
+
+_index_page_cache = []
+
+def render_index():
+    global _index_page_cache
+    index = render("index.jinja",
+        articles=get_recent_articles(),
+        )
+    _index_page_cache = index.split(SEP)
+
 
 @app.route('/')
 def index():
-    return render("index.jinja",
-        articles=fetch_articles(),
-        recent_commented_articles=get_recent_commented_articles(),
-        )
+    return _recent_commented_articles_cache.join(
+            _index_page_cache)
+
+
+_article_page_cache = {}
 
 @app.route('/article/<int:articleid>')
 def article(articleid):
-    return render('article.jinja',
-        article=fetch_article(articleid),
-        recent_commented_articles=get_recent_commented_articles(),
+    return _recent_commented_articles_cache.join(_article_page_cache[articleid])
+
+def render_article(articleid):
+    article_page = render('article.jinja',
+        article=_all_articles[articleid],
+        comments=_all_comments[articleid],
         )
+    _article_page_cache[articleid] = article_page.split(SEP)
 
 @app.route('/post', methods=('GET', 'POST'))
 def post():
     if flask.request.method == 'GET':
-        return render("post.jinja", recent_commented_articles=get_recent_commented_articles())
+        page = render("post.jinja")
+        return page.replace(SEP, _recent_commented_articles_cache)
+    title = flask.request.form['title']
+    body = flask.request.form['body']
     con = db.con
     cur = con.cursor()
-    cur.execute("INSERT INTO article SET title=%s, body=%s", (flask.request.form['title'], flask.request.form['body']))
-    print cur.lastrowid
+    cur.execute("INSERT INTO article SET title=%s, body=%s", (title, body))
+    id = cur.lastrowid
     con.commit()
+    _all_articles[id] = Article(id, title, body, datetime.datetime.now())
+    render_article(id)
     return flask.redirect('/')
 
 @app.route('/comment/<int:articleid>', methods=['POST'])
 def comment(articleid):
-    cur = db.con.cursor()
     form = flask.request.form
+    name = form['name']
+    body = form['body']
+
+    con = db.con
+    cur = con.cursor()
     cur.execute("INSERT INTO comment SET article=%s, name=%s, body=%s",
                 (articleid, form['name'], form['body'])
                 )
-    db.con.commit()
+    con.commit()
+    _all_comments[articleid].append(
+            Comment(cur.lastrowid, articleid, name, body, datetime.datetime.now()))
+    if articleid in _recent_commented_articles:
+        _recent_commented_articles.remove(articleid)
+    else:
+        _recent_commented_articles.pop()
+    _recent_commented_articles.insert(0, articleid)
+    render_recent_commented_articles()
+    render_article(articleid)
     return flask.redirect('/')
 
 
-_cache = {}
+_static = {}
+_page_cache = {}
+
 
 def prepare_static(scan_dir, prefix='/static/'):
     for dir, _, files in os.walk(scan_dir):
@@ -130,61 +209,42 @@ def prepare_static(scan_dir, prefix='/static/'):
                 content_type = 'image/jpeg'
             p = os.path.join(dir, f)
             data = open(p).read()
-            _cache[prefix + os.path.relpath(p, scan_dir)] = (
+            _static[prefix + os.path.relpath(p, scan_dir)] = (
                     [('Content-Length', str(len(data))),
                      ('Content-Type', content_type),
-                     ], data) * 2
-    #print _cache.keys()
+                     ], data)
+    for k in _static.keys():
+        print "static:", k
 
-def cache_middleware(app):
+# snippets:
+#if 'gzip' in env.get('HTTP_ACCEPT_ENCODING', ''):
+
+def static_middleware(app):
+    u"""静的ファイルを Flask をショートカットして _static から転送する."""
     def get_cache(env, start):
         path = env['PATH_INFO']
-        if env['REQUEST_METHOD'] == 'GET' and path in _cache:
-            if 'gzip' in env.get('HTTP_ACCEPT_ENCODING', ''):
-                head, body = _cache[path][2:]
-            else:
-                head, body = _cache[path][:2]
+        if env['REQUEST_METHOD'] == 'GET' and path in _static:
+            head, body = _static[path]
             start("200 OK", head)
-            return [body]
+            return (body,)
         return app(env, start)
     return get_cache
 
+def prepare_pages():
+    print "fetch articles"
+    fetch_articles()
+    print "fetch comments"
+    fetch_comments()
+    print "calculate recent commented articles."
+    fetch_recent_commented_articles()
 
-def update_all_cache():
-    text_html = ('Content-Type', 'text/html')
-    gzip_enc = ('Content-Encoding', 'gzip')
-    def cl(d):
-        return ('Content-Length', str(len(d)))
-
-    data = index().encode('utf-8')
-    cdata = compress(data)
-    _cache['/'] = ([text_html, cl(data)], data,
-            [text_html, gzip_enc, cl(cdata)], cdata)
-
-    data = render("post.jinja",
-            recent_commented_articles=get_recent_commented_articles()).encode('utf-8')
-    cdata = compress(data)
-    _cache['/post'] = ([text_html, cl(data)], data,
-            [text_html, gzip_enc, cl(cdata)], cdata)
-
-    articleid = 0
-    while True:
-        print articleid
-        cur = db.con.cursor(DictCursor)
-        cur.execute('SELECT id,title,body,created_at FROM article WHERE id>%s LIMIT 100', (articleid,))
-        for row in cur:
-            articleid = row['id']
-            data = render('article.jinja',
-                    article=row,
-                    recent_commented_articles=get_recent_commented_articles(),
-                    ).encode('utf-8')
-            cdata = compress(data)
-            _cache['/article/'+str(articleid)] = (
-                    [text_html, cl(data)], data,
-                    [text_html, gzip_enc, cl(cdata)], cdata
-                    )
-        if cur.rowcount == 0:
-            break
+    print "rendering index."
+    render_index()
+    print "rendering sidebar."
+    render_recent_commented_articles()
+    for k in _all_articles.iterkeys():
+        print "rendering article:", k
+        render_article(k)
 
 def sleep(secs):
     t = time.time() + secs
@@ -194,21 +254,19 @@ def sleep(secs):
         if time.time() > t:
             break
 
-def background_update():
-    update_all_cache()
-    print "bg"
-    #meinheld.schedule_call(5, background_update)
+def prepare():
+    prepare_static('../staticfiles', '/')
+    prepare_pages()
 
-prepare_static('../staticfiles', '/')
-app.wsgi_app = cache_middleware(app.wsgi_app)
+app.wsgi_app = static_middleware(app.wsgi_app)
 
 if __name__ == '__main__':
     #app.run(host='0.0.0.0', port=5000)
-    import meinheld
-    meinheld.set_access_logger(None)
-    meinheld.set_backlog(128)
-    meinheld.set_keepalive(0)
-    meinheld.listen(('0.0.0.0', 5000))
-
-    background_update()
-    meinheld.run(app)
+    prepare()
+    app.run(debug=True)
+    #import meinheld
+    #meinheld.set_access_logger(None)
+    #meinheld.set_backlog(128)
+    #meinheld.set_keepalive(0)
+    #meinheld.listen(('0.0.0.0', 5000))
+    #meinheld.run(static_middleware(app.wsgi_app))
