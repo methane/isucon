@@ -6,7 +6,7 @@ var fs = require('fs'),
 var http_load = require('http_load'),
     engine = require('bench_engine.js');
 
-var HTTP_LOAD_PARALLEL = 2, //10,
+var HTTP_LOAD_PARALLEL = 10, //10,
     HTTP_LOAD_SECONDS = 60, //180,
     COMMENT_POST_PER_MIN_MAIN = 40,
     COMMENT_POST_PER_MIN_OPT = 20,
@@ -248,10 +248,11 @@ function checkArticle(articleid, data, callback){
 
     if (initialDataSet.length < 1) {
       callback({summary:'success', articleid:0});
+    } else {
+        var article = initialDataSet[Math.floor(Math.random() * initialDataSet.length)];
+        articleid = article.id;
+        data = article.data;
     }
-    var article = initialDataSet[Math.floor(Math.random() * initialDataSet.length)];
-    articleid = article.id;
-    data = article.data;
   }
   engine.getArticle('/article/' + articleid, targetHost, targetPort, true, function(err, content){
     if (err){ callback({summary:'error', reason:['in checkArticle']}); return; }
@@ -319,7 +320,7 @@ function output(dirpath, load_result, checker_result, poster_result, callback){
     fs.writeFileSync(dirpath + '/result' + (new Date()).getTime(), JSON.stringify(data, null, '\t') + '\n', 'utf8');
 
   if (standalone) {
-    console.log(data);
+    console.log(JSON.stringify(data));
     callback();
     return;
   }
