@@ -188,7 +188,7 @@ def comment(articleid):
     con = db.con
     cur = con.cursor()
     cur.execute("INSERT INTO comment SET article=%s, name=%s, body=%s",
-                (articleid, form['name'], form['body'])
+                (articleid, 'name', 'body')
                 )
     id = cur.lastrowid
     con.commit()
@@ -271,7 +271,7 @@ app.wsgi_app = static_middleware(app.wsgi_app)
 
 if __name__ == '__main__':
     prepare()
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    #app.run(host='0.0.0.0', port=5000, debug=True)
     #import meinheld
     #meinheld.set_access_logger(None)
     #meinheld.set_backlog(128)

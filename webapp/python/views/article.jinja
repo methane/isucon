@@ -3,7 +3,7 @@
 {% block content %}
 <div class="article">
 <div class="title">{{ article.title }}</div>
-<div class="created">{{ article.created_at }}</div>
+<div class="created">{{ article.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</div>
 <div class="body">
 {% for line in article.body.splitlines() %}
 {{ line }}<br>
@@ -16,8 +16,8 @@
 
 {% for comment in comments %}
 <div class="comment">
-<div class="name">{{ comment.name | default("名無しさん") }}</div>
-<div class="created">{{ comment.created_at }}</div>
+<div class="name">{{ comment.name | default("名無しさん", boolean=True) }}</div>
+<div class="created">{{ comment.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</div>
 <div class="body">
 {% for line in comment.body.split('\n') %}
 {{ line }}<br />
