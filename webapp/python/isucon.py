@@ -3,6 +3,8 @@ mein_greenlet = greenlet.getcurrent()
 
 import os
 import json
+import gzip
+from cStringIO import StringIO
 
 import pymysql
 from pymysql.cursors import DictCursor
@@ -19,6 +21,13 @@ config = json.load(open('../config/hosts.json'))
 print config
 
 
+def compress(b):
+    s = StringIO()
+    f = gzip.GzipFile(None, 'wb', 9, fileobj=s)
+    f.write(b)
+    f.flush()
+    return s.getvalue()
+
 class DB(object):
     @property
     def con(self):
@@ -32,7 +41,6 @@ class DB(object):
                     )
 
 db = DB()
-
 
 app = flask.Flask(__name__)
 
@@ -54,9 +62,10 @@ _recent_articles_cache = None
 _recent_articles_cache_fetched = None
 
 def get_recent_commented_articles():
-    global _recent_articles_cache, _recent_articles_cache_fetched
+    global _recent_articles_cache
+    global _recent_articles_cache_fetched
     if _recent_articles_cache is None or _recent_articles_cache_fetched + 3 < time.time():
-        _recent_articles_cache = fetch_recent_commented_articles()
+        _recent_articles_cache = fetch_articles()
         _recent_articles_cache_fetched = time.time()
     return _recent_articles_cache
 
@@ -124,14 +133,17 @@ def prepare_static(scan_dir, prefix='/static/'):
             _cache[prefix + os.path.relpath(p, scan_dir)] = (
                     [('Content-Length', str(len(data))),
                      ('Content-Type', content_type),
-                     ], data)
+                     ], data) * 2
     #print _cache.keys()
 
 def cache_middleware(app):
     def get_cache(env, start):
         path = env['PATH_INFO']
         if env['REQUEST_METHOD'] == 'GET' and path in _cache:
-            head, body = _cache[path]
+            if 'gzip' in env.get('HTTP_ACCEPT_ENCODING', ''):
+                head, body = _cache[path][2:]
+            else:
+                head, body = _cache[path][:2]
             start("200 OK", head)
             return [body]
         return app(env, start)
@@ -140,13 +152,20 @@ def cache_middleware(app):
 
 def update_all_cache():
     text_html = ('Content-Type', 'text/html')
+    gzip_enc = ('Content-Encoding', 'gzip')
+    def cl(d):
+        return ('Content-Length', str(len(d)))
 
     data = index().encode('utf-8')
-    _cache['/'] = ([text_html, ('Content-Length', str(len(data)))], data)
+    cdata = compress(data)
+    _cache['/'] = ([text_html, cl(data)], data,
+            [text_html, gzip_enc, cl(cdata)], cdata)
 
     data = render("post.jinja",
             recent_commented_articles=get_recent_commented_articles()).encode('utf-8')
-    _cache['/post'] = ([text_html, ('Content-Length', str(len(data)))], data)
+    cdata = compress(data)
+    _cache['/post'] = ([text_html, cl(data)], data,
+            [text_html, gzip_enc, cl(cdata)], cdata)
 
     articleid = 0
     while True:
@@ -159,9 +178,11 @@ def update_all_cache():
                     article=row,
                     recent_commented_articles=get_recent_commented_articles(),
                     ).encode('utf-8')
+            cdata = compress(data)
             _cache['/article/'+str(articleid)] = (
-                    [text_html, ('Content-Length', str(len(data)))],
-                    data)
+                    [text_html, cl(data)], data,
+                    [text_html, gzip_enc, cl(cdata)], cdata
+                    )
         if cur.rowcount == 0:
             break
 
