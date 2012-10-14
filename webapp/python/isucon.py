@@ -116,7 +116,11 @@ def get_recent_commented_articles():
     return [_all_articles[id] for id in _recent_commented_articles]
 
 
+### sidebar
+
+# 事前にレンダリングしたサイドバー
 _recent_commented_articles_cache = b''
+
 def render_recent_commented_articles():
     global _recent_commented_articles_cache
     _recent_commented_articles_cache = render(
@@ -124,27 +128,23 @@ def render_recent_commented_articles():
             recent_commented_articles = get_recent_commented_articles(),
             )
 
+### index
+
+# 事前にレンダリングした index ページ
 _index_page_cache = []
 
 def render_index():
     global _index_page_cache
-    index = render("index.jinja",
-        articles=get_recent_articles(),
-        )
+    index = render("index.jinja", articles=get_recent_articles())
     _index_page_cache = index.split(SEP)
-
 
 @app.route('/')
 def index():
-    return _recent_commented_articles_cache.join(
-            _index_page_cache)
+    return _recent_commented_articles_cache.join(_index_page_cache)
 
+### article
 
 _article_page_cache = {}
-
-@app.route('/article/<int:articleid>')
-def article(articleid):
-    return _recent_commented_articles_cache.join(_article_page_cache[articleid])
 
 def render_article(articleid):
     article_page = render('article.jinja',
@@ -152,6 +152,11 @@ def render_article(articleid):
         comments=_all_comments[articleid],
         )
     _article_page_cache[articleid] = article_page.split(SEP)
+
+@app.route('/article/<int:articleid>')
+def article(articleid):
+    return _recent_commented_articles_cache.join(_article_page_cache[articleid])
+
 
 @app.route('/post', methods=('GET', 'POST'))
 def post():
@@ -163,10 +168,15 @@ def post():
     con = db.con
     cur = con.cursor()
     cur.execute("INSERT INTO article SET title=%s, body=%s", (title, body))
-    id = cur.lastrowid
+    article_id = cur.lastrowid
     con.commit()
-    _all_articles[id] = Article(id, title, body, datetime.datetime.now())
-    render_article(id)
+    article = Article(article_id, title, body, datetime.datetime.now())
+    print article
+    _all_articles[article_id] = article
+    render_article(article_id)
+    _recent_articles.insert(0, article_id)
+    _recent_articles.pop()
+    render_index()
     return flask.redirect('/')
 
 @app.route('/comment/<int:articleid>', methods=['POST'])
@@ -180,22 +190,21 @@ def comment(articleid):
     cur.execute("INSERT INTO comment SET article=%s, name=%s, body=%s",
                 (articleid, form['name'], form['body'])
                 )
+    id = cur.lastrowid
     con.commit()
-    _all_comments[articleid].append(
-            Comment(cur.lastrowid, articleid, name, body, datetime.datetime.now()))
+    _all_comments[articleid].append(Comment(id, articleid, name, body, datetime.datetime.now()))
     if articleid in _recent_commented_articles:
         _recent_commented_articles.remove(articleid)
     else:
         _recent_commented_articles.pop()
     _recent_commented_articles.insert(0, articleid)
+    print _recent_commented_articles
     render_recent_commented_articles()
     render_article(articleid)
     return flask.redirect('/')
 
 
 _static = {}
-_page_cache = {}
-
 
 def prepare_static(scan_dir, prefix='/static/'):
     for dir, _, files in os.walk(scan_dir):
@@ -234,7 +243,7 @@ def prepare_pages():
     print "fetch articles"
     fetch_articles()
     print "fetch comments"
-    fetch_comments()
+    #fetch_comments()
     print "calculate recent commented articles."
     fetch_recent_commented_articles()
 
@@ -261,12 +270,11 @@ def prepare():
 app.wsgi_app = static_middleware(app.wsgi_app)
 
 if __name__ == '__main__':
-    #app.run(host='0.0.0.0', port=5000)
     prepare()
-    app.run(debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=True)
     #import meinheld
     #meinheld.set_access_logger(None)
     #meinheld.set_backlog(128)
     #meinheld.set_keepalive(0)
     #meinheld.listen(('0.0.0.0', 5000))
-    #meinheld.run(static_middleware(app.wsgi_app))
+    #meinheld.run(app.wsgi_app)
