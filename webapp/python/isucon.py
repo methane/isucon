@@ -1,6 +1,12 @@
 # coding: utf-8
+from meinheld import patch
+patch.patch_socket()
+
 import greenlet
 mein_greenlet = greenlet.getcurrent()
+
+DEBUG = 0
+FORM = 0
 
 import os
 from itertools import imap
@@ -66,7 +72,7 @@ jinja_env = Environment(loader=jinja2.FileSystemLoader('views'))
 
 def render(template, **params):
     params['host'] = '' ## TODO
-    return jinja_env.get_template(template).render(**params)
+    return jinja_env.get_template(template).render(**params).encode('utf-8')
 
 _recent_commented_articles = []
 
@@ -155,7 +161,9 @@ def render_article(articleid):
 
 @app.route('/article/<int:articleid>')
 def article(articleid):
-    return _recent_commented_articles_cache.join(_article_page_cache[articleid])
+    header, footer = _article_page_cache[articleid]
+    return flask.Response([header, _recent_commented_articles_cache, footer])
+    #return _recent_commented_articles_cache.join(_article_page_cache[articleid])
 
 
 @app.route('/post', methods=('GET', 'POST'))
@@ -216,14 +224,15 @@ def prepare_static(scan_dir, prefix='/static/'):
                 content_type = 'application/javascript'
             elif f.endswith(('.jpg', '.jpeg')):
                 content_type = 'image/jpeg'
+            else:
+                print "Unknown file format:", f
+            print content_type, f
             p = os.path.join(dir, f)
             data = open(p).read()
             _static[prefix + os.path.relpath(p, scan_dir)] = (
                     [('Content-Length', str(len(data))),
                      ('Content-Type', content_type),
                      ], data)
-    for k in _static.keys():
-        print "static:", k
 
 # snippets:
 #if 'gzip' in env.get('HTTP_ACCEPT_ENCODING', ''):
@@ -243,7 +252,8 @@ def prepare_pages():
     print "fetch articles"
     fetch_articles()
     print "fetch comments"
-    #fetch_comments()
+    if not DEBUG:
+        fetch_comments()
     print "calculate recent commented articles."
     fetch_recent_commented_articles()
 
@@ -255,13 +265,16 @@ def prepare_pages():
         print "rendering article:", k
         render_article(k)
 
-def sleep(secs):
-    t = time.time() + secs
+def msleep(secs):
+    end = time.time() + secs
+    s = secs
     while 1:
-        meinheld.schedule_call(1, greenlet.getcurrent().switch)
+        meinheld.schedule_call(s, greenlet.getcurrent().switch)
         mein_greenlet.switch()
-        if time.time() > t:
+        t = time.time()
+        if t > end:
             break
+        s = end - t
 
 def prepare():
     prepare_static('../staticfiles', '/')
@@ -269,12 +282,17 @@ def prepare():
 
 app.wsgi_app = static_middleware(app.wsgi_app)
 
-if __name__ == '__main__':
+def main():
     prepare()
-    #app.run(host='0.0.0.0', port=5000, debug=True)
-    #import meinheld
-    #meinheld.set_access_logger(None)
-    #meinheld.set_backlog(128)
-    #meinheld.set_keepalive(0)
-    #meinheld.listen(('0.0.0.0', 5000))
-    #meinheld.run(app.wsgi_app)
+    if DEBUG:
+        app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)
+    else:
+        import meinheld
+        meinheld.set_access_logger(None)
+        meinheld.set_backlog(128)
+        meinheld.set_keepalive(0)
+        meinheld.listen(('0.0.0.0', 5000))
+        meinheld.run(app.wsgi_app)
+
+if __name__ == '__main__':
+    main()
