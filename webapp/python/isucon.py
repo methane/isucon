@@ -1,15 +1,19 @@
 # coding: utf-8
-from meinheld import patch
-patch.patch_socket()
-
-import greenlet
-mein_greenlet = greenlet.getcurrent()
-
-DEBUG = 0
+import sys
+DEBUG = 'mein' not in sys.argv
 FORM = 0
+
+if not DEBUG:
+    import meinheld
+    from meinheld import patch
+    patch.patch_socket()
+
+    import greenlet
+    mein_greenlet = greenlet.getcurrent()
 
 import os
 from itertools import imap
+import signal
 import json
 import gzip
 import datetime
@@ -25,6 +29,49 @@ import re
 import time
 import jinja2
 from jinja2 import evalcontextfilter, Markup, escape, Environment
+
+
+import redis
+import cPickle
+
+
+def notify_update(name, obj):
+    client = redis.StrictRedis()
+    client.publish("isucon", cPickle.dumps((name, obj)))
+
+def on_new_comment(comment):
+    articleid = comment.article
+    _all_comments[articleid].append(comment)
+    if articleid in _recent_commented_articles:
+        _recent_commented_articles.remove(articleid)
+    else:
+        _recent_commented_articles.pop()
+    _recent_commented_articles.insert(0, articleid)
+    render_recent_commented_articles()
+    render_article(articleid)
+
+def on_new_article(article):
+    article_id = article.id
+    _all_articles[article_id] = article
+    render_article(article_id)
+    _recent_articles.insert(0, article_id)
+    _recent_articles.pop()
+    render_index()
+
+def subscribe_update():
+    client = redis.Redis()
+    pubsub = client.pubsub()
+    pubsub.subscribe("isucon")
+    for msg in pubsub.listen():
+        if msg['type'] != 'message':
+            continue
+        data = cPickle.loads(msg['data'])
+
+        if data[0] == 'article':
+            on_new_article(Article._make(data[1]))
+        elif data[0] == 'comment':
+            on_new_comment(Comment._make(data[1]))
+
 
 
 SEP = b"<!--recent_commented_articles-->"
@@ -179,12 +226,8 @@ def post():
     article_id = cur.lastrowid
     con.commit()
     article = Article(article_id, title, body, datetime.datetime.now())
-    print article
-    _all_articles[article_id] = article
-    render_article(article_id)
-    _recent_articles.insert(0, article_id)
-    _recent_articles.pop()
-    render_index()
+    notify_update('article', article)
+    #on_new_article(articles)
     return flask.redirect('/')
 
 @app.route('/comment/<int:articleid>', methods=['POST'])
@@ -195,20 +238,12 @@ def comment(articleid):
 
     con = db.con
     cur = con.cursor()
-    cur.execute("INSERT INTO comment SET article=%s, name=%s, body=%s",
-                (articleid, 'name', 'body')
-                )
+    cur.execute("INSERT INTO comment SET article=%s, name=%s, body=%s", (articleid, 'name', 'body'))
     id = cur.lastrowid
     con.commit()
-    _all_comments[articleid].append(Comment(id, articleid, name, body, datetime.datetime.now()))
-    if articleid in _recent_commented_articles:
-        _recent_commented_articles.remove(articleid)
-    else:
-        _recent_commented_articles.pop()
-    _recent_commented_articles.insert(0, articleid)
-    print _recent_commented_articles
-    render_recent_commented_articles()
-    render_article(articleid)
+    comment = Comment(id, articleid, name, body, datetime.datetime.now())
+    notify_update('comment', comment)
+    #on_new_comment(comment)
     return flask.redirect('/')
 
 
@@ -262,19 +297,11 @@ def prepare_pages():
     print "rendering sidebar."
     render_recent_commented_articles()
     for k in _all_articles.iterkeys():
-        print "rendering article:", k
         render_article(k)
 
 def msleep(secs):
-    end = time.time() + secs
-    s = secs
-    while 1:
-        meinheld.schedule_call(s, greenlet.getcurrent().switch)
-        mein_greenlet.switch()
-        t = time.time()
-        if t > end:
-            break
-        s = end - t
+    meinheld.schedule_call(secs, greenlet.getcurrent().switch)
+    mein_greenlet.switch()
 
 def prepare():
     prepare_static('../staticfiles', '/')
@@ -282,17 +309,54 @@ def prepare():
 
 app.wsgi_app = static_middleware(app.wsgi_app)
 
-def main():
+def sleeper():
+    while 1:
+        msleep(1)
+
+def debug():
     prepare()
-    if DEBUG:
-        app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)
-    else:
-        import meinheld
-        meinheld.set_access_logger(None)
-        meinheld.set_backlog(128)
-        meinheld.set_keepalive(0)
-        meinheld.listen(('0.0.0.0', 5000))
+    import threading
+    update_thread = threading.Thread(target=subscribe_update)
+    update_thread.daemon = True
+    update_thread.start()
+    app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)
+
+class Logger(object):
+    def error(self, *msg):
+        print >>sys.stderr, msg
+
+def main():
+    import meinheld
+    from multiprocessing import Process
+
+    def kill_all():
+        for w in workers:
+            w.terminate()
+    signal.signal(signal.SIGTERM, kill_all)
+
+    def run():
+        meinheld.spawn(prepare)
+        meinheld.spawn(subscribe_update)
+        meinheld.spawn(sleeper)
         meinheld.run(app.wsgi_app)
 
+    meinheld.set_backlog(128)
+    meinheld.set_keepalive(0)
+    meinheld.listen(('0.0.0.0', 5000))
+    meinheld.set_error_logger(Logger())
+    meinheld.set_access_logger(None)
+
+    workers = []
+    for i in xrange(2):
+        w = Process(target=run)
+        w.start()
+        workers.append(w)
+    while True:
+        for w in workers:
+            w.join(1)
+
 if __name__ == '__main__':
-    main()
+    if DEBUG:
+        debug()
+    else:
+        main()
